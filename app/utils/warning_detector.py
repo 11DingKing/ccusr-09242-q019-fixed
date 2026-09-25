@@ -54,7 +54,8 @@ def calculate_yearly_indicators(
         if not graduates:
             continue
 
-        stats = calculate_group_stats(graduates)
+        # 预警检测只用到落实率/对口率，不携带逐人追溯明细
+        stats = calculate_group_stats(graduates, include_sample_scope=False)
 
         yearly_data.append({
             "year": year,

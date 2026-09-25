@@ -28,10 +28,18 @@ from app.schemas import (
     YearlyTrendItem,
     ReportResponse,
     ReportItem,
+    FreezeReportRequest,
+    FrozenReportListResponse,
     WarningListResponse,
     WarningListItem,
     AttributionDistributionResponse,
     AttributionDistributionItem,
+)
+from app.services import (
+    build_report,
+    freeze_report,
+    load_frozen_report,
+    list_frozen_reports,
 )
 from app.utils import (
     get_comparison_stats,
@@ -161,8 +169,38 @@ def get_yearly_trend(
     )
 
 
-@router.get("/reports/by-college", response_model=ReportResponse)
-def get_report_by_college(db: Session = Depends(get_db)):
+def _stats_to_report_item(
+    stats,
+    dimension: str,
+    dimension_value: str,
+    subject_type: str = None,
+    subject_id: int = None,
+) -> ReportItem:
+    return ReportItem(
+        dimension=dimension,
+        dimension_value=dimension_value,
+        total_count=stats.total_count,
+        confirmed_rate=stats.confirmed_rate,
+        aligned_rate=stats.aligned_rate,
+        avg_salary_display=stats.avg_salary_display,
+        avg_satisfaction_display=stats.avg_satisfaction_display,
+        retention_rate_display=stats.retention_rate_display,
+        follow_up_count=stats.follow_up_count,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        satisfaction_sample_count=stats.satisfaction_sample_count,
+        satisfaction_missing_count=stats.satisfaction_missing_count,
+        retention_sample_count=stats.retention_sample_count,
+        retention_missing_count=stats.retention_missing_count,
+        retention_unreachable_count=stats.retention_unreachable_count,
+        avg_satisfaction=stats.avg_satisfaction,
+        retention_rate=stats.retention_rate,
+        policy_version=stats.policy_version,
+        sample_scope=stats.sample_scope,
+    )
+
+
+def _build_report_by_college(db: Session) -> ReportResponse:
     colleges = db.query(College).all()
     data = []
 
@@ -173,16 +211,9 @@ def get_report_by_college(db: Session = Depends(get_db)):
         _eager_load_follow_ups(db, graduates)
 
         stats = calculate_group_stats(graduates)
-        data.append(ReportItem(
-            dimension="学院",
-            dimension_value=college.name,
-            total_count=stats.total_count,
-            confirmed_rate=stats.confirmed_rate,
-            aligned_rate=stats.aligned_rate,
-            avg_salary_display=stats.avg_salary_display,
-            avg_satisfaction_display=stats.avg_satisfaction_display,
-            retention_rate_display=stats.retention_rate_display,
-            follow_up_count=stats.follow_up_count,
+        data.append(_stats_to_report_item(
+            stats, dimension="学院", dimension_value=college.name,
+            subject_type="college", subject_id=college.id,
         ))
 
     return ReportResponse(
@@ -192,8 +223,7 @@ def get_report_by_college(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/reports/by-micro-major", response_model=ReportResponse)
-def get_report_by_micro_major(db: Session = Depends(get_db)):
+def _build_report_by_micro_major(db: Session) -> ReportResponse:
     micro_majors = db.query(MicroMajor).all()
     data = []
 
@@ -202,16 +232,8 @@ def get_report_by_micro_major(db: Session = Depends(get_db)):
     ).all()
     _eager_load_follow_ups(db, all_without_micro)
     stats_all = calculate_group_stats(all_without_micro)
-    data.append(ReportItem(
-        dimension="微专业",
-        dimension_value="未修读微专业",
-        total_count=stats_all.total_count,
-        confirmed_rate=stats_all.confirmed_rate,
-        aligned_rate=stats_all.aligned_rate,
-        avg_salary_display=stats_all.avg_salary_display,
-        avg_satisfaction_display=stats_all.avg_satisfaction_display,
-        retention_rate_display=stats_all.retention_rate_display,
-        follow_up_count=stats_all.follow_up_count,
+    data.append(_stats_to_report_item(
+        stats_all, dimension="微专业", dimension_value="未修读微专业",
     ))
 
     for mm in micro_majors:
@@ -222,16 +244,9 @@ def get_report_by_micro_major(db: Session = Depends(get_db)):
         _eager_load_follow_ups(db, graduates)
 
         stats = calculate_group_stats(graduates)
-        data.append(ReportItem(
-            dimension="微专业",
-            dimension_value=mm.name,
-            total_count=stats.total_count,
-            confirmed_rate=stats.confirmed_rate,
-            aligned_rate=stats.aligned_rate,
-            avg_salary_display=stats.avg_salary_display,
-            avg_satisfaction_display=stats.avg_satisfaction_display,
-            retention_rate_display=stats.retention_rate_display,
-            follow_up_count=stats.follow_up_count,
+        data.append(_stats_to_report_item(
+            stats, dimension="微专业", dimension_value=mm.name,
+            subject_type="micro_major", subject_id=mm.id,
         ))
 
     return ReportResponse(
@@ -241,8 +256,7 @@ def get_report_by_micro_major(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/reports/by-year", response_model=ReportResponse)
-def get_report_by_year(db: Session = Depends(get_db)):
+def _build_report_by_year(db: Session) -> ReportResponse:
     years = db.query(Graduate.graduation_year).distinct().order_by(
         Graduate.graduation_year
     ).all()
@@ -256,16 +270,9 @@ def get_report_by_year(db: Session = Depends(get_db)):
         _eager_load_follow_ups(db, graduates)
 
         stats = calculate_group_stats(graduates)
-        data.append(ReportItem(
-            dimension="届次",
-            dimension_value=f"{year}届",
-            total_count=stats.total_count,
-            confirmed_rate=stats.confirmed_rate,
-            aligned_rate=stats.aligned_rate,
-            avg_salary_display=stats.avg_salary_display,
-            avg_satisfaction_display=stats.avg_satisfaction_display,
-            retention_rate_display=stats.retention_rate_display,
-            follow_up_count=stats.follow_up_count,
+        data.append(_stats_to_report_item(
+            stats, dimension="届次", dimension_value=f"{year}届",
+            subject_type="year", subject_id=year,
         ))
 
     return ReportResponse(
@@ -275,8 +282,7 @@ def get_report_by_year(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/reports/by-employer-follow-up", response_model=ReportResponse)
-def get_report_by_employer_follow_up(db: Session = Depends(get_db)):
+def _build_report_by_employer_follow_up(db: Session) -> ReportResponse:
     employed_graduates = db.query(Graduate).filter(
         Graduate.destination_type == DestinationType.EMPLOYMENT
     ).all()
@@ -289,27 +295,11 @@ def get_report_by_employer_follow_up(db: Session = Depends(get_db)):
     stats_without = calculate_group_stats(without_micro)
 
     data = [
-        ReportItem(
-            dimension="用人单位回访",
-            dimension_value="修读微专业",
-            total_count=stats_with.total_count,
-            confirmed_rate=stats_with.confirmed_rate,
-            aligned_rate=stats_with.aligned_rate,
-            avg_salary_display=stats_with.avg_salary_display,
-            avg_satisfaction_display=stats_with.avg_satisfaction_display,
-            retention_rate_display=stats_with.retention_rate_display,
-            follow_up_count=stats_with.follow_up_count,
+        _stats_to_report_item(
+            stats_with, dimension="用人单位回访", dimension_value="修读微专业",
         ),
-        ReportItem(
-            dimension="用人单位回访",
-            dimension_value="未修读微专业",
-            total_count=stats_without.total_count,
-            confirmed_rate=stats_without.confirmed_rate,
-            aligned_rate=stats_without.aligned_rate,
-            avg_salary_display=stats_without.avg_salary_display,
-            avg_satisfaction_display=stats_without.avg_satisfaction_display,
-            retention_rate_display=stats_without.retention_rate_display,
-            follow_up_count=stats_without.follow_up_count,
+        _stats_to_report_item(
+            stats_without, dimension="用人单位回访", dimension_value="未修读微专业",
         ),
     ]
 
@@ -318,6 +308,102 @@ def get_report_by_employer_follow_up(db: Session = Depends(get_db)):
         data=data,
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
+
+
+# 报告口径 -> 构建函数，预览与冻结共用同一份取数逻辑
+REPORT_BUILDERS = {
+    "by-college": _build_report_by_college,
+    "by-micro-major": _build_report_by_micro_major,
+    "by-year": _build_report_by_year,
+    "by-employer-follow-up": _build_report_by_employer_follow_up,
+}
+
+
+def _freeze_report(report_type: str, db: Session, body: FreezeReportRequest) -> ReportResponse:
+    try:
+        record = freeze_report(
+            db, report_type, lambda: REPORT_BUILDERS[report_type](db),
+            created_by=body.created_by, snapshot_id=body.snapshot_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return load_frozen_report(db, record.snapshot_id)
+
+
+@router.get("/reports/by-college", response_model=ReportResponse)
+def get_report_by_college(db: Session = Depends(get_db)):
+    return build_report("by-college", lambda: _build_report_by_college(db))
+
+
+@router.post("/reports/by-college/freeze", response_model=ReportResponse)
+def freeze_report_by_college(
+    body: FreezeReportRequest = FreezeReportRequest(),
+    db: Session = Depends(get_db),
+):
+    return _freeze_report("by-college", db, body)
+
+
+@router.get("/reports/by-micro-major", response_model=ReportResponse)
+def get_report_by_micro_major(db: Session = Depends(get_db)):
+    return build_report("by-micro-major", lambda: _build_report_by_micro_major(db))
+
+
+@router.post("/reports/by-micro-major/freeze", response_model=ReportResponse)
+def freeze_report_by_micro_major(
+    body: FreezeReportRequest = FreezeReportRequest(),
+    db: Session = Depends(get_db),
+):
+    return _freeze_report("by-micro-major", db, body)
+
+
+@router.get("/reports/by-year", response_model=ReportResponse)
+def get_report_by_year(db: Session = Depends(get_db)):
+    return build_report("by-year", lambda: _build_report_by_year(db))
+
+
+@router.post("/reports/by-year/freeze", response_model=ReportResponse)
+def freeze_report_by_year(
+    body: FreezeReportRequest = FreezeReportRequest(),
+    db: Session = Depends(get_db),
+):
+    return _freeze_report("by-year", db, body)
+
+
+@router.get("/reports/by-employer-follow-up", response_model=ReportResponse)
+def get_report_by_employer_follow_up(db: Session = Depends(get_db)):
+    return build_report(
+        "by-employer-follow-up", lambda: _build_report_by_employer_follow_up(db)
+    )
+
+
+@router.post("/reports/by-employer-follow-up/freeze", response_model=ReportResponse)
+def freeze_report_by_employer_follow_up(
+    body: FreezeReportRequest = FreezeReportRequest(),
+    db: Session = Depends(get_db),
+):
+    return _freeze_report("by-employer-follow-up", db, body)
+
+
+@router.get("/reports/frozen", response_model=FrozenReportListResponse)
+def list_frozen_statistics_reports(
+    report_type: Optional[str] = Query(None, description="按报告口径过滤"),
+    db: Session = Depends(get_db),
+):
+    if report_type is not None and report_type not in REPORT_BUILDERS:
+        raise HTTPException(status_code=400, detail="不支持的报告口径")
+    return list_frozen_reports(db, report_type=report_type)
+
+
+@router.get("/reports/frozen/{snapshot_id:path}", response_model=ReportResponse)
+def get_frozen_statistics_report(snapshot_id: str, db: Session = Depends(get_db)):
+    try:
+        return load_frozen_report(db, snapshot_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="报告快照不存在")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 
 
 @router.get("/reports/warnings", response_model=WarningListResponse)

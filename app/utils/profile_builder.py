@@ -110,7 +110,8 @@ def build_profile_stats(
 
     all_graduates = query.all()
     _eager_load_follow_ups(db, all_graduates)
-    overall_stats = calculate_group_stats(all_graduates)
+    # 画像汇总只需指标与样本数，不携带逐人追溯明细
+    overall_stats = calculate_group_stats(all_graduates, include_sample_scope=False)
 
     yearly_data = calculate_yearly_indicators(db, target_type, target_id)
 

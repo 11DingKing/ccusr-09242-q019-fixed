@@ -166,30 +166,68 @@
 #### 满意度 (`avg_satisfaction`)
 
 ```
-分子 = 该组所有回访记录的 satisfaction_score 之和
-分母 = 该组 satisfaction_score 非 None 的回访记录数
-公式 = 分子 / 分母，保留2位小数
+分子 = 该组所有回访记录中"有效评分"之和
+分母 = 有效评分的回访记录数（satisfaction_sample_count）
+有效评分 = satisfaction_score 非空 且 1 ≤ score ≤ 5（含边界）
+公式 = 分子 / 分母，保留2位小数；无有效评分时为 None（"暂无数据"）
 ```
 
-- 注意：分母是**回访记录数**而非毕业生人数，一个毕业生有多次回访则多次计入
+- 分母仍是**回访记录数**而非毕业生人数，一个毕业生有多次有效评分回访则多次计入
+- 评分缺失（NULL）或越界（<1 或 >5）的记录**不纳入**，计入 `satisfaction_missing_count`
+- 评分缺失/越界只影响满意度，不影响该记录留任状态的采用
 
 #### 留任率 (`retention_rate`)
 
 ```
-对每个毕业生取其最新一次回访记录（按 follow_up_date 最大）
-分子 = 最新回访中 is_still_employed=True 的毕业生人数
-分母 = 有至少一条回访记录的毕业生人数
-公式 = (分子 / 分母) × 100，保留2位小数
+对每个毕业生，在其全部回访中取"最近一次有效回访"：
+  · 有效回访 = is_still_employed 非空
+  · 选取规则 = follow_up_date 最大；同日取 id 最大（最新写入）
+分子 = 被选回访中 is_still_employed=True 的毕业生人数
+分母 = 至少存在一条有效回访的毕业生人数（retention_sample_count）
+公式 = (分子 / 分母) × 100，保留2位小数；无人有有效回访时为 None
 ```
 
-- 代码位置：[stats_calculator.py L65-L76](file:///Users/huangding/Documents/SOLOCODE%203/0614/mbp/zj-00295-gradtrack-5/app/utils/stats_calculator.py#L65-L76)
-- 每个毕业生只取最新一条回访，不会重复计数
+- 代码位置：[stats_calculator.py](../app/utils/stats_calculator.py)
+- 每个毕业生只取最近一条有效回访，不会重复计数
+- 最近一次回访缺少留任状态时，回退到上一次有留任状态的回访
+- **缺失评分不能把留任状态排除**：回访没有满意度评分，只要有留任状态就进入分母
+- 未进入分母的原因分两类返回：
+  - `retention_unreachable_count`：无任何回访记录（无法联络）
+  - `retention_missing_count`：有回访但全部缺少留任状态
 
 #### 回访覆盖数 (`follow_up_count`)
 
 ```
-值 = 该组所有回访记录的总条数
+值 = 该组所有回访记录的总条数（含评分/留任状态缺失的记录）
 ```
+
+#### 样本口径追溯 (`sample_scope`)
+
+每个 `GroupStats` / `ReportItem` 都携带 `sample_scope`，使报告能从比例追到采用记录：
+
+| 字段 | 含义 |
+|------|------|
+| `policy_version` | 生成时的样本规则版本（如 `2026-09-sample-scope-v1`） |
+| `cohort_size` | 分群毕业生总数 |
+| `satisfaction_sample_count` / `satisfaction_missing_count` | 有效/缺失评分回访数 |
+| `retention_sample_count` / `retention_missing_count` / `retention_unreachable_count` | 留任分母人数与未纳入分类 |
+| `members[]` | 每位毕业生的采用情况：`graduate_id`、被选回访 id 与日期、评分有效/缺失条数、`exclusion_reasons` |
+
+`members` 只暴露毕业生 id 与回访记录 id，不含姓名、学号、用人单位名称等个人信息，
+使调用方可以核对分母构成，但不会越权看到个人字段。
+
+#### 报告冻结
+
+四个报表接口（按学院/微专业/届次/用人单位回访）支持"预览 → 确认冻结"：
+
+- `GET .../reports/by-*`：按当前数据实时预览，响应带 `policy_version` 与 `sample_scope`
+- `POST .../reports/by-*/freeze`：确认后把**生成时的成员集合**（各分组采用的
+  graduate_id / follow_up_id）、规则版本、规则文字说明与报告正文一起写入
+  `report_snapshots` 表，并计算 sha256 摘要
+- 快照只新增、不覆盖：重复 `snapshot_id` 返回 400；之后新增回访或重新运行预警检测
+  都不会改写旧报告，实时预览与冻结报告可以不同
+- `GET .../reports/frozen` 与 `GET .../reports/frozen/{snapshot_id}` 用于列表与读取，
+  读取时重新计算摘要，正文被篡改返回 409
 
 ---
 
@@ -432,9 +470,9 @@
 | 去向落实率 | `destination_status ∈ {CONFIRMED, VERIFIED}` 的人数 | 全体毕业生 | graduates | 含所有去向状态 |
 | 对口就业率 | `destination_type=EMPLOYMENT ∧ is_aligned=True` 的人数 | `destination_type=EMPLOYMENT` 的人数 | graduates | 仅就业毕业生 |
 | 平均起薪 | Σ `salary_range` 中位值 | `salary_range ≠ None` 的人数 | graduates | 区间中位值近似 |
-| 满意度 | Σ `satisfaction_score` | `satisfaction_score ≠ None` 的回访记录数 | employer_follow_ups | 按记录数非人数 |
-| 留任率 | 最新回访 `is_still_employed=True` 的毕业生数 | 有回访记录的毕业生数 | employer_follow_ups | 取每人最新回访 |
-| 回访覆盖数 | — | — | employer_follow_ups | 回访记录总条数 |
+| 满意度 | Σ 有效评分 | 有效评分(非空且1-5)的回访记录数 | employer_follow_ups | 按记录数非人数；缺失/越界记录计入 missing |
+| 留任率 | 最近一次有效回访 `is_still_employed=True` 的毕业生数 | 有有效回访(留任状态非空)的毕业生数 | employer_follow_ups | 每人取最近一次；评分缺失不排除留任 |
+| 回访覆盖数 | — | — | employer_follow_ups | 回访记录总条数（含缺失记录） |
 
 ---
 

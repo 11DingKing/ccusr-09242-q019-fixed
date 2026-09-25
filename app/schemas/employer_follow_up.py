@@ -9,7 +9,7 @@ class EmployerFollowUpBase(BaseSchema):
     follow_up_date: date
     is_aligned: bool = False
     satisfaction_score: Optional[float] = None
-    is_still_employed: bool = True
+    is_still_employed: Optional[bool] = True
     salary_change: Optional[SalaryChange] = None
     employer_name: Optional[str] = None
     job_title: Optional[str] = None
@@ -41,7 +41,7 @@ class FollowUpTimelineItem(BaseSchema):
     follow_up_date: date
     is_aligned: bool
     satisfaction_score: Optional[float]
-    is_still_employed: bool
+    is_still_employed: Optional[bool]
     salary_change: Optional[SalaryChange]
     employer_name: Optional[str]
     job_title: Optional[str]

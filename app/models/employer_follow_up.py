@@ -12,7 +12,7 @@ class EmployerFollowUp(Base, TimestampMixin):
     follow_up_date = Column(Date, nullable=False, comment="回访日期")
     is_aligned = Column(Boolean, default=False, comment="岗位与所学是否对口")
     satisfaction_score = Column(Float, comment="用人单位满意度评分(1-5)")
-    is_still_employed = Column(Boolean, default=True, comment="是否还在职")
+    is_still_employed = Column(Boolean, nullable=True, comment="是否还在职；未记录留任状态时为空，不纳入留任率样本")
     salary_change = Column(Enum(SalaryChange), comment="薪资变化")
     employer_name = Column(String(200), comment="用人单位名称")
     job_title = Column(String(100), comment="岗位名称")
