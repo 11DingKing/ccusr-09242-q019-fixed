@@ -4,6 +4,11 @@ from sqlalchemy import and_
 
 from app.models import Graduate, EmployerFollowUp, DestinationStatus, DestinationType
 from app.schemas import GroupStats, ComparisonStats, FollowUpComparisonStats
+from app.services.sample_scope import (
+    SAMPLE_RULE_VERSION,
+    evaluate_follow_ups,
+    summarize_decisions,
+)
 from .salary_utils import get_salary_midpoint, format_salary_display
 
 
@@ -23,6 +28,10 @@ def calculate_group_stats(graduates: List[Graduate]) -> GroupStats:
             retention_rate=None,
             retention_rate_display="暂无数据",
             follow_up_count=0,
+            satisfaction_sample_count=0,
+            satisfaction_excluded_count=0,
+            retention_sample_count=0,
+            sample_rule_version=SAMPLE_RULE_VERSION,
         )
 
     confirmed_graduates = [
@@ -56,24 +65,10 @@ def calculate_group_stats(graduates: List[Graduate]) -> GroupStats:
         if hasattr(g, 'follow_ups') and g.follow_ups:
             follow_ups.extend(g.follow_ups)
 
-    satisfaction_scores = [
-        fu.satisfaction_score for fu in follow_ups
-        if fu.satisfaction_score is not None
-    ]
-    avg_satisfaction = round(sum(satisfaction_scores) / len(satisfaction_scores), 2) if satisfaction_scores else None
-
-    graduates_with_fu = set(fu.graduate_id for fu in follow_ups)
-    latest_fu_map = {}
-    for fu in follow_ups:
-        gid = fu.graduate_id
-        if gid not in latest_fu_map or fu.follow_up_date > latest_fu_map[gid].follow_up_date:
-            latest_fu_map[gid] = fu
-
-    if latest_fu_map:
-        still_employed = sum(1 for fu in latest_fu_map.values() if fu.is_still_employed)
-        retention_rate = round((still_employed / len(latest_fu_map)) * 100, 2)
-    else:
-        retention_rate = None
+    decisions = evaluate_follow_ups(follow_ups)
+    scope_summary = summarize_decisions(decisions)
+    avg_satisfaction = scope_summary["avg_satisfaction"]
+    retention_rate = scope_summary["retention_rate"]
 
     return GroupStats(
         total_count=total_count,
@@ -88,6 +83,10 @@ def calculate_group_stats(graduates: List[Graduate]) -> GroupStats:
         retention_rate=retention_rate,
         retention_rate_display=_format_retention(retention_rate),
         follow_up_count=len(follow_ups),
+        satisfaction_sample_count=scope_summary["satisfaction_sample_count"],
+        satisfaction_excluded_count=scope_summary["satisfaction_excluded_count"],
+        retention_sample_count=scope_summary["retention_sample_count"],
+        sample_rule_version=SAMPLE_RULE_VERSION,
     )
 
 

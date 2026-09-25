@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from app.models import (
     AttributionRecord,
     AttributionCategory,
     ProvinceReferenceLine,
+    ReportSnapshotRecord,
 )
 from app.schemas import (
     ComparisonStats,
@@ -32,6 +33,21 @@ from app.schemas import (
     WarningListItem,
     AttributionDistributionResponse,
     AttributionDistributionItem,
+    SampleScopeResponse,
+    SampleScopeSummary,
+    SampleScopeRecordItem,
+    ReportConfirmRequest,
+    ReportConfirmResponse,
+    ReportSnapshotResponse,
+    ReportSnapshotRow,
+    ReportSnapshotListItem,
+    ReportSnapshotListResponse,
+)
+from app.services.report_snapshot import payload_digest
+from app.services.sample_scope import (
+    SAMPLE_RULE_VERSION,
+    evaluate_follow_ups,
+    summarize_decisions,
 )
 from app.utils import (
     get_comparison_stats,
@@ -46,6 +62,76 @@ from app.utils import (
 from app.utils.stats_calculator import _eager_load_follow_ups
 
 router = APIRouter(prefix="/statistics", tags=["统计分析"])
+
+
+def _report_item_from_stats(dimension: str, dimension_value: str, stats) -> ReportItem:
+    return ReportItem(
+        dimension=dimension,
+        dimension_value=dimension_value,
+        total_count=stats.total_count,
+        confirmed_rate=stats.confirmed_rate,
+        aligned_rate=stats.aligned_rate,
+        avg_salary_display=stats.avg_salary_display,
+        avg_satisfaction_display=stats.avg_satisfaction_display,
+        retention_rate_display=stats.retention_rate_display,
+        follow_up_count=stats.follow_up_count,
+        satisfaction_sample_count=stats.satisfaction_sample_count,
+        retention_sample_count=stats.retention_sample_count,
+        sample_rule_version=stats.sample_rule_version,
+    )
+
+
+def _select_graduates(
+    db: Session,
+    graduation_year: Optional[int] = None,
+    college_id: Optional[int] = None,
+    micro_major_id: Optional[int] = None,
+    has_micro_major: Optional[bool] = None,
+) -> List[Graduate]:
+    query = db.query(Graduate)
+
+    filters = []
+    if graduation_year:
+        filters.append(Graduate.graduation_year == graduation_year)
+    if college_id:
+        filters.append(Graduate.college_id == college_id)
+    if micro_major_id:
+        filters.append(Graduate.has_micro_major == True)
+        filters.append(Graduate.micro_major_id == micro_major_id)
+    elif has_micro_major is not None:
+        filters.append(Graduate.has_micro_major == has_micro_major)
+
+    if filters:
+        query = query.filter(and_(*filters))
+
+    return query.all()
+
+
+def _collect_follow_ups(graduates: List[Graduate]) -> List[EmployerFollowUp]:
+    follow_ups = []
+    for g in graduates:
+        if hasattr(g, 'follow_ups') and g.follow_ups:
+            follow_ups.extend(g.follow_ups)
+    return follow_ups
+
+
+def _build_sample_scope_response(graduates: List[Graduate]) -> SampleScopeResponse:
+    decisions = evaluate_follow_ups(_collect_follow_ups(graduates))
+    summary = summarize_decisions(decisions)
+    return SampleScopeResponse(
+        summary=SampleScopeSummary(
+            sample_rule_version=SAMPLE_RULE_VERSION,
+            graduate_count=len(graduates),
+            member_ids=sorted(g.id for g in graduates),
+            follow_up_count=summary["follow_up_count"],
+            satisfaction_sample_count=summary["satisfaction_sample_count"],
+            satisfaction_excluded_count=summary["satisfaction_excluded_count"],
+            retention_sample_count=summary["retention_sample_count"],
+            avg_satisfaction=summary["avg_satisfaction"],
+            retention_rate=summary["retention_rate"],
+        ),
+        records=[SampleScopeRecordItem(**decision.to_dict()) for decision in decisions],
+    )
 
 
 @router.get("/comparison", response_model=ComparisonStats)
@@ -76,6 +162,29 @@ def get_follow_up_group_comparison(
         college_id=college_id,
         micro_major_id=micro_major_id,
     )
+
+
+@router.get("/sample-scope", response_model=SampleScopeResponse)
+def get_sample_scope(
+    graduation_year: Optional[int] = Query(None, description="毕业届次"),
+    college_id: Optional[int] = Query(None, description="学院ID"),
+    micro_major_id: Optional[int] = Query(None, description="微专业ID"),
+    has_micro_major: Optional[bool] = Query(None, description="是否修读微专业"),
+    db: Session = Depends(get_db),
+):
+    """查看当前统计口径下的成员集合与每条回访记录的采用结论。
+
+    返回的记录仅含内部标识与统计取值，不包含姓名、学号等个人信息。
+    """
+    graduates = _select_graduates(
+        db,
+        graduation_year=graduation_year,
+        college_id=college_id,
+        micro_major_id=micro_major_id,
+        has_micro_major=has_micro_major,
+    )
+    _eager_load_follow_ups(db, graduates)
+    return _build_sample_scope_response(graduates)
 
 
 @router.get("/trend/{micro_major_id}", response_model=YearlyTrendResponse)
@@ -161,122 +270,57 @@ def get_yearly_trend(
     )
 
 
-@router.get("/reports/by-college", response_model=ReportResponse)
-def get_report_by_college(db: Session = Depends(get_db)):
-    colleges = db.query(College).all()
-    data = []
-
-    for college in colleges:
+def _build_college_rows(db: Session) -> List[Tuple[ReportItem, List[Graduate]]]:
+    rows = []
+    for college in db.query(College).all():
         graduates = db.query(Graduate).filter(
             Graduate.college_id == college.id
         ).all()
         _eager_load_follow_ups(db, graduates)
-
         stats = calculate_group_stats(graduates)
-        data.append(ReportItem(
-            dimension="学院",
-            dimension_value=college.name,
-            total_count=stats.total_count,
-            confirmed_rate=stats.confirmed_rate,
-            aligned_rate=stats.aligned_rate,
-            avg_salary_display=stats.avg_salary_display,
-            avg_satisfaction_display=stats.avg_satisfaction_display,
-            retention_rate_display=stats.retention_rate_display,
-            follow_up_count=stats.follow_up_count,
-        ))
-
-    return ReportResponse(
-        report_type="按学院统计",
-        data=data,
-        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    )
+        rows.append((_report_item_from_stats("学院", college.name, stats), graduates))
+    return rows
 
 
-@router.get("/reports/by-micro-major", response_model=ReportResponse)
-def get_report_by_micro_major(db: Session = Depends(get_db)):
-    micro_majors = db.query(MicroMajor).all()
-    data = []
+def _build_micro_major_rows(db: Session) -> List[Tuple[ReportItem, List[Graduate]]]:
+    rows = []
 
     all_without_micro = db.query(Graduate).filter(
         Graduate.has_micro_major == False
     ).all()
     _eager_load_follow_ups(db, all_without_micro)
     stats_all = calculate_group_stats(all_without_micro)
-    data.append(ReportItem(
-        dimension="微专业",
-        dimension_value="未修读微专业",
-        total_count=stats_all.total_count,
-        confirmed_rate=stats_all.confirmed_rate,
-        aligned_rate=stats_all.aligned_rate,
-        avg_salary_display=stats_all.avg_salary_display,
-        avg_satisfaction_display=stats_all.avg_satisfaction_display,
-        retention_rate_display=stats_all.retention_rate_display,
-        follow_up_count=stats_all.follow_up_count,
-    ))
+    rows.append((_report_item_from_stats("微专业", "未修读微专业", stats_all), all_without_micro))
 
-    for mm in micro_majors:
+    for mm in db.query(MicroMajor).all():
         graduates = db.query(Graduate).filter(
             Graduate.micro_major_id == mm.id,
             Graduate.has_micro_major == True
         ).all()
         _eager_load_follow_ups(db, graduates)
-
         stats = calculate_group_stats(graduates)
-        data.append(ReportItem(
-            dimension="微专业",
-            dimension_value=mm.name,
-            total_count=stats.total_count,
-            confirmed_rate=stats.confirmed_rate,
-            aligned_rate=stats.aligned_rate,
-            avg_salary_display=stats.avg_salary_display,
-            avg_satisfaction_display=stats.avg_satisfaction_display,
-            retention_rate_display=stats.retention_rate_display,
-            follow_up_count=stats.follow_up_count,
-        ))
-
-    return ReportResponse(
-        report_type="按微专业统计",
-        data=data,
-        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    )
+        rows.append((_report_item_from_stats("微专业", mm.name, stats), graduates))
+    return rows
 
 
-@router.get("/reports/by-year", response_model=ReportResponse)
-def get_report_by_year(db: Session = Depends(get_db)):
+def _build_year_rows(db: Session) -> List[Tuple[ReportItem, List[Graduate]]]:
     years = db.query(Graduate.graduation_year).distinct().order_by(
         Graduate.graduation_year
     ).all()
     years = [y[0] for y in years]
-    data = []
+    rows = []
 
     for year in years:
         graduates = db.query(Graduate).filter(
             Graduate.graduation_year == year
         ).all()
         _eager_load_follow_ups(db, graduates)
-
         stats = calculate_group_stats(graduates)
-        data.append(ReportItem(
-            dimension="届次",
-            dimension_value=f"{year}届",
-            total_count=stats.total_count,
-            confirmed_rate=stats.confirmed_rate,
-            aligned_rate=stats.aligned_rate,
-            avg_salary_display=stats.avg_salary_display,
-            avg_satisfaction_display=stats.avg_satisfaction_display,
-            retention_rate_display=stats.retention_rate_display,
-            follow_up_count=stats.follow_up_count,
-        ))
-
-    return ReportResponse(
-        report_type="按届次统计",
-        data=data,
-        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    )
+        rows.append((_report_item_from_stats("届次", f"{year}届", stats), graduates))
+    return rows
 
 
-@router.get("/reports/by-employer-follow-up", response_model=ReportResponse)
-def get_report_by_employer_follow_up(db: Session = Depends(get_db)):
+def _build_employer_follow_up_rows(db: Session) -> List[Tuple[ReportItem, List[Graduate]]]:
     employed_graduates = db.query(Graduate).filter(
         Graduate.destination_type == DestinationType.EMPLOYMENT
     ).all()
@@ -288,36 +332,170 @@ def get_report_by_employer_follow_up(db: Session = Depends(get_db)):
     stats_with = calculate_group_stats(with_micro)
     stats_without = calculate_group_stats(without_micro)
 
-    data = [
-        ReportItem(
-            dimension="用人单位回访",
-            dimension_value="修读微专业",
-            total_count=stats_with.total_count,
-            confirmed_rate=stats_with.confirmed_rate,
-            aligned_rate=stats_with.aligned_rate,
-            avg_salary_display=stats_with.avg_salary_display,
-            avg_satisfaction_display=stats_with.avg_satisfaction_display,
-            retention_rate_display=stats_with.retention_rate_display,
-            follow_up_count=stats_with.follow_up_count,
-        ),
-        ReportItem(
-            dimension="用人单位回访",
-            dimension_value="未修读微专业",
-            total_count=stats_without.total_count,
-            confirmed_rate=stats_without.confirmed_rate,
-            aligned_rate=stats_without.aligned_rate,
-            avg_salary_display=stats_without.avg_salary_display,
-            avg_satisfaction_display=stats_without.avg_satisfaction_display,
-            retention_rate_display=stats_without.retention_rate_display,
-            follow_up_count=stats_without.follow_up_count,
-        ),
+    return [
+        (_report_item_from_stats("用人单位回访", "修读微专业", stats_with), with_micro),
+        (_report_item_from_stats("用人单位回访", "未修读微专业", stats_without), without_micro),
     ]
 
+
+REPORT_BUILDERS = {
+    "by-college": ("按学院统计", _build_college_rows),
+    "by-micro-major": ("按微专业统计", _build_micro_major_rows),
+    "by-year": ("按届次统计", _build_year_rows),
+    "by-employer-follow-up": ("用人单位回访对照统计", _build_employer_follow_up_rows),
+}
+
+
+def _report_response(report_type_key: str, db: Session) -> ReportResponse:
+    report_name, builder = REPORT_BUILDERS[report_type_key]
+    rows = builder(db)
     return ReportResponse(
-        report_type="用人单位回访对照统计",
-        data=data,
+        report_type=report_name,
+        data=[item for item, _ in rows],
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
+
+
+@router.get("/reports/by-college", response_model=ReportResponse)
+def get_report_by_college(db: Session = Depends(get_db)):
+    return _report_response("by-college", db)
+
+
+@router.get("/reports/by-micro-major", response_model=ReportResponse)
+def get_report_by_micro_major(db: Session = Depends(get_db)):
+    return _report_response("by-micro-major", db)
+
+
+@router.get("/reports/by-year", response_model=ReportResponse)
+def get_report_by_year(db: Session = Depends(get_db)):
+    return _report_response("by-year", db)
+
+
+@router.get("/reports/by-employer-follow-up", response_model=ReportResponse)
+def get_report_by_employer_follow_up(db: Session = Depends(get_db)):
+    return _report_response("by-employer-follow-up", db)
+
+
+def _snapshot_to_response(record: ReportSnapshotRecord) -> ReportSnapshotResponse:
+    payload = record.payload or {}
+    return ReportSnapshotResponse(
+        snapshot_id=record.snapshot_id,
+        report_type=record.report_type,
+        report_name=payload.get("report_name", record.report_type),
+        sample_rule_version=record.sample_rule_version,
+        status=record.status,
+        confirmed_by=record.confirmed_by,
+        confirmed_at=record.confirmed_at,
+        note=record.note,
+        digest=record.digest,
+        rows=[ReportSnapshotRow(**row) for row in payload.get("rows", [])],
+    )
+
+
+@router.post("/reports/{report_type}/confirm", response_model=ReportConfirmResponse)
+def confirm_report(
+    report_type: str,
+    request: ReportConfirmRequest,
+    db: Session = Depends(get_db),
+):
+    """确认报表并冻结生成时的成员集合、采用记录与口径版本。
+
+    快照按内容寻址：数据未变时重复确认返回同一快照；数据变化后再次确认
+    会生成新快照，旧快照保持原样，后续回访或重新检测都不会改写它。
+    """
+    if report_type not in REPORT_BUILDERS:
+        raise HTTPException(status_code=404, detail="未知的报表类型")
+    if not request.confirmed_by or not request.confirmed_by.strip():
+        raise HTTPException(status_code=400, detail="确认人不能为空")
+
+    report_name, builder = REPORT_BUILDERS[report_type]
+    rows = builder(db)
+
+    payload_rows = []
+    for item, graduates in rows:
+        decisions = evaluate_follow_ups(_collect_follow_ups(graduates))
+        payload_rows.append({
+            "dimension": item.dimension,
+            "dimension_value": item.dimension_value,
+            "metrics": item.model_dump(),
+            "member_ids": sorted(g.id for g in graduates),
+            "records": [decision.to_dict() for decision in decisions],
+        })
+
+    payload = {
+        "report_type": report_type,
+        "report_name": report_name,
+        "sample_rule_version": SAMPLE_RULE_VERSION,
+        "rows": payload_rows,
+    }
+    digest = payload_digest(payload)
+    snapshot_id = f"{report_type}:{digest[:16]}"
+
+    existing = db.query(ReportSnapshotRecord).filter(
+        ReportSnapshotRecord.snapshot_id == snapshot_id
+    ).first()
+    if existing:
+        response = _snapshot_to_response(existing)
+        return ReportConfirmResponse(**response.model_dump(), created=False)
+
+    record = ReportSnapshotRecord(
+        snapshot_id=snapshot_id,
+        report_type=report_type,
+        sample_rule_version=SAMPLE_RULE_VERSION,
+        status="confirmed",
+        confirmed_by=request.confirmed_by.strip(),
+        confirmed_at=datetime.now(),
+        note=request.note,
+        digest=digest,
+        payload=payload,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    response = _snapshot_to_response(record)
+    return ReportConfirmResponse(**response.model_dump(), created=True)
+
+
+@router.get("/report-snapshots", response_model=ReportSnapshotListResponse)
+def list_report_snapshots(
+    report_type: Optional[str] = Query(None, description="报表类型"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ReportSnapshotRecord)
+    if report_type:
+        query = query.filter(ReportSnapshotRecord.report_type == report_type)
+    records = query.order_by(
+        ReportSnapshotRecord.confirmed_at.desc(),
+        ReportSnapshotRecord.id.desc(),
+    ).all()
+
+    data = []
+    for record in records:
+        payload = record.payload or {}
+        data.append(ReportSnapshotListItem(
+            snapshot_id=record.snapshot_id,
+            report_type=record.report_type,
+            report_name=payload.get("report_name", record.report_type),
+            sample_rule_version=record.sample_rule_version,
+            status=record.status,
+            confirmed_by=record.confirmed_by,
+            confirmed_at=record.confirmed_at,
+            digest=record.digest,
+            row_count=len(payload.get("rows", [])),
+        ))
+    return ReportSnapshotListResponse(total=len(data), data=data)
+
+
+@router.get("/report-snapshots/{snapshot_id}", response_model=ReportSnapshotResponse)
+def get_report_snapshot(snapshot_id: str, db: Session = Depends(get_db)):
+    """读取已冻结的报告快照，始终返回确认时的成员集合与采用记录。"""
+    record = db.query(ReportSnapshotRecord).filter(
+        ReportSnapshotRecord.snapshot_id == snapshot_id
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="报告快照不存在")
+    return _snapshot_to_response(record)
 
 
 @router.get("/reports/warnings", response_model=WarningListResponse)

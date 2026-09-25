@@ -4,7 +4,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core import init_db, SessionLocal
-from app.models import Base, ProvinceReferenceLine, Warning, AttributionRecord
+from app.models import Base, ProvinceReferenceLine, Warning, AttributionRecord, ReportSnapshotRecord
 
 
 def migrate():
@@ -22,10 +22,12 @@ def migrate():
         bench_count = db.query(ProvinceReferenceLine).count()
         warning_count = db.query(Warning).count()
         attribution_count = db.query(AttributionRecord).count()
+        snapshot_count = db.query(ReportSnapshotRecord).count()
 
         print(f"   省基准线表: {bench_count} 条记录")
         print(f"   预警表: {warning_count} 条记录")
         print(f"   归因记录表: {attribution_count} 条记录")
+        print(f"   报告快照表: {snapshot_count} 条记录")
 
         if bench_count == 0:
             print("\n3. 省基准线表为空，请运行 python scripts/init_data.py 初始化数据")

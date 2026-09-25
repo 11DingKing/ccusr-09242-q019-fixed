@@ -166,24 +166,29 @@
 #### 满意度 (`avg_satisfaction`)
 
 ```
-分子 = 该组所有回访记录的 satisfaction_score 之和
-分母 = 该组 satisfaction_score 非 None 的回访记录数
+分子 = 该组所有回访记录中有效满意度评分之和
+分母 = 该组有效满意度评分的回访记录数
 公式 = 分子 / 分母，保留2位小数
 ```
 
+- 有效评分 = `satisfaction_score` 非空且落在 1-5 区间（含边界）；缺失或越界评分不进入分母
 - 注意：分母是**回访记录数**而非毕业生人数，一个毕业生有多次回访则多次计入
+- 样本量通过 `satisfaction_sample_count`（纳入条数）与 `satisfaction_excluded_count`（未纳入条数）返回，未纳入原因可逐条追溯（评分缺失 / 评分超出1-5有效范围）
 
 #### 留任率 (`retention_rate`)
 
 ```
-对每个毕业生取其最新一次回访记录（按 follow_up_date 最大）
-分子 = 最新回访中 is_still_employed=True 的毕业生人数
-分母 = 有至少一条回访记录的毕业生人数
+对每个毕业生取其最近一次有效回访（有效 = 有回访日期且在职状态非空；
+同日多条时按记录ID较大者为准）
+分子 = 最近有效回访中 is_still_employed=True 的毕业生人数
+分母 = 有至少一条有效回访记录的毕业生人数
 公式 = (分子 / 分母) × 100，保留2位小数
 ```
 
-- 代码位置：[stats_calculator.py L65-L76](file:///Users/huangding/Documents/SOLOCODE%203/0614/mbp/zj-00295-gradtrack-5/app/utils/stats_calculator.py#L65-L76)
-- 每个毕业生只取最新一条回访，不会重复计数
+- 代码位置：[stats_calculator.py](file:///Users/huangding/Documents/SOLOCODE%203/0614/mbp/zj-00295-gradtrack-5/app/utils/stats_calculator.py) 与 [sample_scope.py](file:///Users/huangding/Documents/SOLOCODE%203/0614/mbp/zj-00295-gradtrack-5/app/services/sample_scope.py)
+- 每个毕业生只取最近一次有效回访，不会重复计数
+- **评分缺失不影响留任**：最近一次回访没有满意度评分时，该毕业生仍计入留任率分母
+- 分母人数通过 `retention_sample_count` 返回
 
 #### 回访覆盖数 (`follow_up_count`)
 
@@ -432,13 +437,47 @@
 | 去向落实率 | `destination_status ∈ {CONFIRMED, VERIFIED}` 的人数 | 全体毕业生 | graduates | 含所有去向状态 |
 | 对口就业率 | `destination_type=EMPLOYMENT ∧ is_aligned=True` 的人数 | `destination_type=EMPLOYMENT` 的人数 | graduates | 仅就业毕业生 |
 | 平均起薪 | Σ `salary_range` 中位值 | `salary_range ≠ None` 的人数 | graduates | 区间中位值近似 |
-| 满意度 | Σ `satisfaction_score` | `satisfaction_score ≠ None` 的回访记录数 | employer_follow_ups | 按记录数非人数 |
-| 留任率 | 最新回访 `is_still_employed=True` 的毕业生数 | 有回访记录的毕业生数 | employer_follow_ups | 取每人最新回访 |
+| 满意度 | Σ 有效 `satisfaction_score`（1-5 含边界） | 有效评分的回访记录数 | employer_follow_ups | 按记录数非人数，样本数随响应返回 |
+| 留任率 | 最近有效回访 `is_still_employed=True` 的毕业生数 | 有有效回访记录的毕业生数 | employer_follow_ups | 取每人最近有效回访，评分缺失不排除 |
 | 回访覆盖数 | — | — | employer_follow_ups | 回访记录总条数 |
 
 ---
 
-## 七、实现要点与注意事项
+## 七、样本口径版本与报告冻结
+
+### 7.1 口径版本
+
+满意度与留任率的取数规则集中在 [sample_scope.py](file:///Users/huangding/Documents/SOLOCODE%203/0614/mbp/zj-00295-gradtrack-5/app/services/sample_scope.py)，当前版本为 `sample-v1`，随 `GroupStats`、`ReportItem` 的 `sample_rule_version` 字段返回。规则要点：
+
+1. 满意度只纳入 1-5（含边界）的有效评分，缺失或越界评分不计入分母；
+2. 留任率按每位毕业生取**最近一次有效回访**（有回访日期且在职状态非空，同日多条按记录ID较大者），评分缺失不把留任状态排除；
+3. 每条回访记录都给出采用结论与未纳入原因，可从报告逐条追溯到采用记录。
+
+### 7.2 样本口径追溯接口
+
+`GET /statistics/sample-scope`（支持 `graduation_year`、`college_id`、`micro_major_id`、`has_micro_major` 过滤）返回：
+
+- `summary`：口径版本、毕业生数与成员标识集合（`member_ids`）、满意度/留任率的样本数与指标值；
+- `records`：每条回访记录的采用结论（是否计入满意度、是否为留任采用的最近一次有效回访、未纳入原因）。
+
+响应只含内部标识与统计取值，**不包含**姓名、学号、用人单位、回访人等个人信息。
+
+### 7.3 报告确认与快照冻结
+
+```
+POST /statistics/reports/{report_type}/confirm   确认并冻结报表
+GET  /statistics/report-snapshots                快照列表（仅元信息）
+GET  /statistics/report-snapshots/{snapshot_id}  读取冻结快照
+```
+
+- `report_type ∈ {by-college, by-micro-major, by-year, by-employer-follow-up}`，与四个报表接口一一对应；
+- 确认时把每一行的指标、成员集合（`member_ids`）、采用记录（`records`）与口径版本整体写入 `report_snapshots` 表，正文计算 SHA-256 摘要，`snapshot_id` 按内容寻址；
+- 数据未变时重复确认返回同一快照（幂等）；数据变化后再次确认生成**新**快照；
+- 旧快照一经确认不再修改：后续新增回访、重新运行预警检测都不会改写已冻结的报告。
+
+---
+
+## 八、实现要点与注意事项
 
 1. **薪资是区间而非精确值**：系统存储的是 `SalaryRange` 枚举而非精确薪资，计算平均起薪时用各区间的中位值近似，"15万以上"取 17.5 万是人为设定上限，实际偏差可能较大。
 

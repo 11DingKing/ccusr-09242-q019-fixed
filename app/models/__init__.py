@@ -18,6 +18,7 @@ from .employer_follow_up import EmployerFollowUp
 from .warning import Warning
 from .attribution_record import AttributionRecord
 from .province_reference_line import ProvinceReferenceLine
+from .report_snapshot import ReportSnapshotRecord
 
 __all__ = [
     "Base",
@@ -39,4 +40,5 @@ __all__ = [
     "Warning",
     "AttributionRecord",
     "ProvinceReferenceLine",
+    "ReportSnapshotRecord",
 ]
